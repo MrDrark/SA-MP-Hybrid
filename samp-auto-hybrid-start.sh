@@ -52,7 +52,7 @@ save_state() {
     cat > "${STATE_FILE}" <<EOF
 LAST_MODE=${SERVER_MODE:-unknown}
 LAST_GAMEMODE=${CURRENT_GAMEMODE:-unknown}
-LAST_RELEASE=${SAMP_RELEASE:-unknown}
+LAST_RELEASE=${RELEASE_LABEL:-unknown}
 LAST_STARTED_AT=${SESSION_ID}
 EOF
 }
@@ -191,18 +191,43 @@ cfg_mode_hint() {
     printf 'unknown'
 }
 
+resolve_release_targets() {
+    local requested_release
+
+    requested_release="$(printf '%s' "${SAMP_RELEASE:-stable}" | tr '[:lower:]' '[:upper:]')"
+    requested_release="${requested_release// /}"
+    requested_release="${requested_release//_/-}"
+    requested_release="${requested_release//--/-}"
+
+    case "${requested_release}" in
+        ""|STABLE|LATEST|R2|R2-1)
+            LINUX_RELEASE="R2-1"
+            WINDOWS_RELEASE="R2-2-1"
+            RELEASE_LABEL="stable (linux R2-1 / windows R2-2-1)"
+        ;;
+        R2-2-1)
+            LINUX_RELEASE="R2-1"
+            WINDOWS_RELEASE="R2-2-1"
+            RELEASE_LABEL="custom (linux R2-1 / windows R2-2-1)"
+            warn "Linux nao possui pacote espelhado equivalente a ${requested_release}. Usando Linux R2-1."
+        ;;
+        *)
+            LINUX_RELEASE="R2-1"
+            WINDOWS_RELEASE="R2-2-1"
+            RELEASE_LABEL="fallback (linux R2-1 / windows R2-2-1)"
+            warn "Release ${requested_release} nao possui pacote de servidor suportado neste egg. Aplicando fallback estavel."
+        ;;
+    esac
+}
+
 build_linux_urls() {
     local release="$1"
-    printf '%s\n' "https://files.sampmobile.com/samp037svr_${release}.tar.gz"
-
-    if [[ "${release}" == "R2-1" ]]; then
-        printf '%s\n' "https://raw.githubusercontent.com/drylian/Eggs/main/Connect/SAMP/server/samp037svr_R2-1.tar.gz"
-    fi
+    printf '%s\n' "https://raw.githubusercontent.com/drylian/Eggs/main/Connect/SAMP/server/samp037svr_${release}.tar.gz"
+    printf '%s\n' "https://github.com/drylian/Eggs/raw/main/Connect/SAMP/server/samp037svr_${release}.tar.gz"
 }
 
 build_windows_urls() {
     local release="$1"
-    printf '%s\n' "https://files.sampmobile.com/samp037_svr_${release}_win32.zip"
     printf '%s\n' "https://gta-multiplayer.cz/downloads/samp037_svr_${release}_win32.zip"
 }
 
@@ -372,13 +397,11 @@ resolve_mode() {
 }
 
 ensure_runtime_files() {
-    local release="${SAMP_RELEASE}"
-
     case "${SERVER_MODE}" in
         linux)
             if [[ ! -f "${APP_ROOT}/samp03svr" ]]; then
-                info "Binario Linux ausente. Baixando runtime Linux ${release}."
-                install_linux_runtime "${release}"
+                info "Binario Linux ausente. Baixando runtime Linux ${LINUX_RELEASE}."
+                install_linux_runtime "${LINUX_RELEASE}"
             fi
         ;;
         windows)
@@ -386,8 +409,8 @@ ensure_runtime_files() {
                 if [[ "${AUTO_DOWNLOAD_WINDOWS:-1}" != "1" ]]; then
                     die "Modo Windows selecionado, mas AUTO_DOWNLOAD_WINDOWS esta desativado e o binario samp-server.exe nao existe."
                 fi
-                info "Binario Windows ausente. Baixando runtime Windows ${release}."
-                install_windows_runtime "${release}"
+                info "Binario Windows ausente. Baixando runtime Windows ${WINDOWS_RELEASE}."
+                install_windows_runtime "${WINDOWS_RELEASE}"
             fi
         ;;
         *)
@@ -561,7 +584,7 @@ launch_server() {
 
     info "Iniciando SA-MP em modo ${SERVER_MODE}."
     info "Gamemode ativa: ${CURRENT_GAMEMODE}"
-    info "Release selecionada: ${SAMP_RELEASE}"
+    info "Release selecionada: ${RELEASE_LABEL}"
 
     start_log_watch "${APP_ROOT}/server_log.txt" "SERVER"
     start_log_watch "${APP_ROOT}/svlog.txt" "VOICE"
@@ -589,10 +612,11 @@ main() {
     trap shutdown_server TERM INT
     trap cleanup EXIT
 
-    SAMP_RELEASE="${SAMP_RELEASE:-R2-2-1}"
+    SAMP_RELEASE="${SAMP_RELEASE:-stable}"
 
     info "Inicializando egg automatico SA-MP Hybrid."
     load_state
+    resolve_release_targets
     resolve_mode
     ensure_runtime_files
     sync_server_cfg
