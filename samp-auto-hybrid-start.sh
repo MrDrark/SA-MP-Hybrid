@@ -645,6 +645,8 @@ launch_server() {
 
     if [[ "${SERVER_MODE}" == "windows" ]]; then
         start_log_watch "${SESSION_DIR}/process.stdout.log" "WINE"
+    else
+        start_log_watch "${SESSION_DIR}/process.stdout.log" "APP"
     fi
 
     (
