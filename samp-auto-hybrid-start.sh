@@ -519,6 +519,27 @@ archive_known_logs() {
     done
 }
 
+request_server_quit() {
+    if [[ -p "${STDIN_PIPE}" ]]; then
+        printf '%s\n' "quit" > "${STDIN_PIPE}" 2>/dev/null || true
+    fi
+}
+
+await_server_stop() {
+    local timeout_seconds="${1:-15}"
+    local waited=0
+
+    while [[ "${waited}" -lt "${timeout_seconds}" ]]; do
+        if [[ -z "${SERVER_PID}" ]] || ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    return 1
+}
+
 shutdown_server() {
     if [[ "${STOPPING}" == "1" ]]; then
         return 0
@@ -528,12 +549,44 @@ shutdown_server() {
     warn "Recebido sinal de parada. Encaminhando para o servidor."
 
     if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
-        if [[ -p "${STDIN_PIPE}" ]]; then
-            printf '%s\n' "quit" > "${STDIN_PIPE}" 2>/dev/null || true
+        request_server_quit
+        if await_server_stop 15; then
+            return 0
         fi
-        sleep 3
+        warn "O servidor nao respondeu ao quit dentro do tempo esperado. Enviando TERM."
         kill -TERM "${SERVER_PID}" 2>/dev/null || true
     fi
+}
+
+forward_stdin() {
+    local line
+    local normalized
+
+    exec 3>"${STDIN_PIPE}"
+
+    while IFS= read -r line; do
+        normalized="$(printf '%s' "${line}" | tr '[:upper:]' '[:lower:]')"
+
+        case "${normalized}" in
+            quit|exit|stop)
+                warn "Comando de parada recebido via stdin do painel."
+                printf '%s\n' "quit" >&3 || true
+
+                if await_server_stop 15; then
+                    break
+                fi
+
+                warn "O servidor ignorou o comando quit recebido via painel. Enviando TERM."
+                kill -TERM "${SERVER_PID}" 2>/dev/null || true
+                break
+            ;;
+            *)
+                printf '%s\n' "${line}" >&3 || true
+            ;;
+        esac
+    done
+
+    exec 3>&-
 }
 
 cleanup() {
@@ -600,7 +653,7 @@ launch_server() {
     ) &
     SERVER_PID="$!"
 
-    cat > "${STDIN_PIPE}" &
+    forward_stdin &
     STDIN_FORWARD_PID="$!"
 
     echo "SA-MP AUTO READY"
