@@ -44,8 +44,15 @@ die() {
 
 load_state() {
     if [[ -f "${STATE_FILE}" ]]; then
-        # shellcheck disable=SC1090
-        source "${STATE_FILE}"
+        while IFS='=' read -r key value; do
+            [[ -n "${key}" ]] || continue
+
+            case "${key}" in
+                LAST_MODE|LAST_GAMEMODE|LAST_RELEASE|LAST_STARTED_AT)
+                    printf -v "${key}" '%s' "${value}"
+                ;;
+            esac
+        done < "${STATE_FILE}"
     fi
 }
 
