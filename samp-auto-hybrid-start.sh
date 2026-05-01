@@ -5,13 +5,15 @@ APP_ROOT="/home/container"
 STATE_ROOT="${APP_ROOT}/.samp-auto"
 STATE_FILE="${STATE_ROOT}/state/runtime.env"
 LOG_ROOT="${STATE_ROOT}/logs"
+BIN_ROOT="${STATE_ROOT}/bin"
 SERVER_CFG="${APP_ROOT}/server.cfg"
 SESSION_ID="$(date +%Y%m%d-%H%M%S)"
 SESSION_DIR="${LOG_ROOT}/${SESSION_ID}"
 STDIN_PIPE="${STATE_ROOT}/stdin.pipe"
 
-mkdir -p "${STATE_ROOT}/state" "${LOG_ROOT}" "${SESSION_DIR}"
+mkdir -p "${STATE_ROOT}/state" "${LOG_ROOT}" "${SESSION_DIR}" "${BIN_ROOT}"
 export HOME="${APP_ROOT}"
+export PATH="${BIN_ROOT}:${PATH}"
 
 WATCH_PIDS=()
 STDIN_FORWARD_PID=""
@@ -57,10 +59,18 @@ load_state() {
 }
 
 save_state() {
+    local release_state
+
+    if [[ "${SERVER_MODE:-linux}" == "windows" ]]; then
+        release_state="${WINDOWS_RELEASE:-unknown}"
+    else
+        release_state="${LINUX_RELEASE:-unknown}"
+    fi
+
     cat > "${STATE_FILE}" <<EOF
 LAST_MODE=${SERVER_MODE:-unknown}
 LAST_GAMEMODE=${CURRENT_GAMEMODE:-unknown}
-LAST_RELEASE=${RELEASE_LABEL:-unknown}
+LAST_RELEASE=${release_state}
 LAST_STARTED_AT=${SESSION_ID}
 EOF
 }
@@ -288,7 +298,40 @@ extract_zip_archive() {
         return 0
     fi
 
-    die "Nao foi encontrado unzip ou bsdtar no container para extrair o pacote Windows."
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "${archive_file}" "${destination}" <<'PY'
+import sys
+import zipfile
+
+archive_path = sys.argv[1]
+destination = sys.argv[2]
+
+with zipfile.ZipFile(archive_path) as zf:
+    zf.extractall(destination)
+PY
+        return 0
+    fi
+
+    if command -v python >/dev/null 2>&1; then
+        python - "${archive_file}" "${destination}" <<'PY'
+import sys
+import zipfile
+
+archive_path = sys.argv[1]
+destination = sys.argv[2]
+
+with zipfile.ZipFile(archive_path) as zf:
+    zf.extractall(destination)
+PY
+        return 0
+    fi
+
+    if command -v busybox >/dev/null 2>&1; then
+        busybox unzip -oq "${archive_file}" -d "${destination}"
+        return 0
+    fi
+
+    die "Nao foi encontrado unzip, bsdtar, python ou busybox no container para extrair o pacote Windows."
 }
 
 install_linux_runtime() {
@@ -535,11 +578,13 @@ request_server_quit() {
 
 proc_cmdline() {
     local pid="$1"
+    [[ -r "/proc/${pid}/cmdline" ]] || return 0
     tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true
 }
 
 proc_comm() {
     local pid="$1"
+    [[ -r "/proc/${pid}/comm" ]] || return 0
     cat "/proc/${pid}/comm" 2>/dev/null || true
 }
 
