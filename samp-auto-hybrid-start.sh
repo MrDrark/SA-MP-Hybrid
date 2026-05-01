@@ -6,12 +6,14 @@ STATE_ROOT="${APP_ROOT}/.samp-auto"
 STATE_FILE="${STATE_ROOT}/state/runtime.env"
 LOG_ROOT="${STATE_ROOT}/logs"
 BIN_ROOT="${STATE_ROOT}/bin"
+PANEL_LOG="${STATE_ROOT}/panel.log"
 SERVER_CFG="${APP_ROOT}/server.cfg"
 SESSION_ID="$(date +%Y%m%d-%H%M%S)"
 SESSION_DIR="${LOG_ROOT}/${SESSION_ID}"
 STDIN_PIPE="${STATE_ROOT}/stdin.pipe"
 
 mkdir -p "${STATE_ROOT}/state" "${LOG_ROOT}" "${SESSION_DIR}" "${BIN_ROOT}"
+: > "${PANEL_LOG}"
 export HOME="${APP_ROOT}"
 export PATH="${BIN_ROOT}:${PATH}"
 
@@ -24,7 +26,11 @@ STOPPING="0"
 log_line() {
     local level="$1"
     local message="$2"
-    printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${level}" "${message}"
+    local rendered
+
+    rendered="$(printf '%s [%s] %s' "$(date '+%Y-%m-%d %H:%M:%S')" "${level}" "${message}")"
+    printf '%s\n' "${rendered}"
+    printf '%s\n' "${rendered}" >> "${PANEL_LOG}" 2>/dev/null || true
 }
 
 info() {
@@ -561,6 +567,7 @@ archive_known_logs() {
         "${APP_ROOT}/samp.log" \
         "${APP_ROOT}/samp.log.txt" \
         "${APP_ROOT}/samp.erro.log.txt" \
+        "${PANEL_LOG}" \
         "${SESSION_DIR}/process.stdout.log" \
         "${SESSION_DIR}/process.stderr.log" \
         "${SERVER_CFG}"; do
