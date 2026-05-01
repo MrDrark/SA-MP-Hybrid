@@ -6,7 +6,7 @@ STATE_ROOT="${APP_ROOT}/.samp-auto"
 STATE_FILE="${STATE_ROOT}/state/runtime.env"
 LOG_ROOT="${STATE_ROOT}/logs"
 BIN_ROOT="${STATE_ROOT}/bin"
-PANEL_LOG="${STATE_ROOT}/panel.log"
+PANEL_LOG="${APP_ROOT}/panel.log"
 SERVER_CFG="${APP_ROOT}/server.cfg"
 SESSION_ID="$(date +%Y%m%d-%H%M%S)"
 SESSION_DIR="${LOG_ROOT}/${SESSION_ID}"
@@ -48,6 +48,39 @@ error() {
 die() {
     error "$1"
     exit 1
+}
+
+validate_remote_script() {
+    local script_path="$1"
+
+    [[ -s "${script_path}" ]] || return 1
+    grep -q '^#!/bin/bash$' "${script_path}" || return 1
+    grep -q '^set -Eeuo pipefail$' "${script_path}" || return 1
+    return 0
+}
+
+maybe_exec_remote_script() {
+    local remote_url="${STARTUP_SCRIPT_URL:-}"
+    local remote_script="/tmp/samp-auto-hybrid-remote.sh"
+
+    if [[ "${SAMP_REMOTE_BOOTSTRAPPED:-0}" == "1" ]]; then
+        return 0
+    fi
+
+    [[ -n "${remote_url}" ]] || return 0
+
+    rm -f "${remote_script}"
+
+    if curl -fsSL --retry 3 --connect-timeout 20 "${remote_url}" | tr -d '\r' > "${remote_script}" \
+        && validate_remote_script "${remote_script}"; then
+        chmod +x "${remote_script}"
+        export SAMP_REMOTE_BOOTSTRAPPED="1"
+        exec bash "${remote_script}" "$@"
+    fi
+
+    printf '%s\n' "[BOOT] Script remoto invalido ou indisponivel. Usando fallback local."
+    printf '%s\n' "[BOOT] Script remoto invalido ou indisponivel. Usando fallback local." >> "${PANEL_LOG}" 2>/dev/null || true
+    rm -f "${remote_script}"
 }
 
 load_state() {
@@ -845,6 +878,8 @@ monitor_server_lifecycle() {
 
 main() {
     local exit_code
+
+    maybe_exec_remote_script "$@"
 
     trap shutdown_server TERM INT
     trap cleanup EXIT
