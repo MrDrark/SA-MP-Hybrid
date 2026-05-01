@@ -16,6 +16,7 @@ export HOME="${APP_ROOT}"
 WATCH_PIDS=()
 STDIN_FORWARD_PID=""
 SERVER_PID=""
+LAUNCHER_PID=""
 STOPPING="0"
 
 log_line() {
@@ -525,13 +526,104 @@ request_server_quit() {
     fi
 }
 
+proc_cmdline() {
+    local pid="$1"
+    tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true
+}
+
+proc_comm() {
+    local pid="$1"
+    cat "/proc/${pid}/comm" 2>/dev/null || true
+}
+
+match_server_process() {
+    local pid="$1"
+    local cmdline
+    local comm
+
+    [[ -d "/proc/${pid}" ]] || return 1
+
+    cmdline="$(proc_cmdline "${pid}")"
+    comm="$(proc_comm "${pid}")"
+
+    case "${SERVER_MODE:-linux}" in
+        windows)
+            [[ "${cmdline}" == *"samp-server.exe"* ]] && return 0
+            [[ "${cmdline}" == *"wine"* && "${cmdline}" == *"samp-server"* ]] && return 0
+        ;;
+        linux|*)
+            [[ "${comm}" == "samp03svr" ]] && return 0
+            [[ "${cmdline}" == *"/samp03svr"* ]] && return 0
+            [[ "${cmdline}" == *"./samp03svr"* ]] && return 0
+        ;;
+    esac
+
+    return 1
+}
+
+find_server_pid() {
+    local proc_dir
+    local pid
+    local newest_pid=""
+
+    for proc_dir in /proc/[0-9]*; do
+        [[ -d "${proc_dir}" ]] || continue
+        pid="${proc_dir##*/}"
+        [[ "${pid}" != "$$" ]] || continue
+        [[ "${pid}" != "${BASHPID}" ]] || continue
+        [[ "${pid}" != "${PPID}" ]] || continue
+
+        if match_server_process "${pid}"; then
+            newest_pid="${pid}"
+        fi
+    done
+
+    printf '%s' "${newest_pid}"
+}
+
+is_server_running() {
+    local pid
+
+    pid="$(find_server_pid)"
+    if [[ -n "${pid}" ]]; then
+        SERVER_PID="${pid}"
+        return 0
+    fi
+
+    if [[ -n "${LAUNCHER_PID}" ]] && kill -0 "${LAUNCHER_PID}" 2>/dev/null; then
+        SERVER_PID="${LAUNCHER_PID}"
+        return 0
+    fi
+
+    SERVER_PID=""
+    return 1
+}
+
 await_server_stop() {
     local timeout_seconds="${1:-15}"
     local waited=0
 
     while [[ "${waited}" -lt "${timeout_seconds}" ]]; do
-        if [[ -z "${SERVER_PID}" ]] || ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+        if ! is_server_running; then
             return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    return 1
+}
+
+wait_for_server_boot() {
+    local timeout_seconds="${1:-20}"
+    local waited=0
+
+    while [[ "${waited}" -lt "${timeout_seconds}" ]]; do
+        if is_server_running; then
+            return 0
+        fi
+        if [[ -n "${LAUNCHER_PID}" ]] && ! kill -0 "${LAUNCHER_PID}" 2>/dev/null; then
+            break
         fi
         sleep 1
         waited=$((waited + 1))
@@ -548,13 +640,16 @@ shutdown_server() {
     STOPPING="1"
     warn "Recebido sinal de parada. Encaminhando para o servidor."
 
-    if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
+    if is_server_running; then
         request_server_quit
         if await_server_stop 15; then
             return 0
         fi
         warn "O servidor nao respondeu ao quit dentro do tempo esperado. Enviando TERM."
         kill -TERM "${SERVER_PID}" 2>/dev/null || true
+        if [[ -n "${LAUNCHER_PID}" ]] && [[ "${LAUNCHER_PID}" != "${SERVER_PID}" ]]; then
+            kill -TERM "${LAUNCHER_PID}" 2>/dev/null || true
+        fi
     fi
 }
 
@@ -577,7 +672,12 @@ forward_stdin() {
                 fi
 
                 warn "O servidor ignorou o comando quit recebido via painel. Enviando TERM."
-                kill -TERM "${SERVER_PID}" 2>/dev/null || true
+                if [[ -n "${SERVER_PID}" ]]; then
+                    kill -TERM "${SERVER_PID}" 2>/dev/null || true
+                fi
+                if [[ -n "${LAUNCHER_PID}" ]] && [[ "${LAUNCHER_PID}" != "${SERVER_PID}" ]]; then
+                    kill -TERM "${LAUNCHER_PID}" 2>/dev/null || true
+                fi
                 break
             ;;
             *)
@@ -653,12 +753,35 @@ launch_server() {
         cd "${APP_ROOT}"
         "${launch_command[@]}" < "${STDIN_PIPE}" >> "${SESSION_DIR}/process.stdout.log" 2>> "${SESSION_DIR}/process.stderr.log"
     ) &
-    SERVER_PID="$!"
+    LAUNCHER_PID="$!"
+    SERVER_PID="${LAUNCHER_PID}"
 
     forward_stdin &
     STDIN_FORWARD_PID="$!"
 
+    if wait_for_server_boot 20; then
+        info "Processo do SA-MP detectado com PID ${SERVER_PID}."
+    else
+        warn "Nao foi possivel confirmar o PID final do SA-MP logo apos a inicializacao. O monitoramento continuara ativo."
+    fi
+
     echo "SA-MP AUTO READY"
+}
+
+monitor_server_lifecycle() {
+    local misses=0
+
+    while true; do
+        if is_server_running; then
+            misses=0
+        else
+            misses=$((misses + 1))
+            if [[ "${misses}" -ge 3 ]]; then
+                return 0
+            fi
+        fi
+        sleep 1
+    done
 }
 
 main() {
@@ -687,14 +810,19 @@ main() {
     save_state
     launch_server
 
+    monitor_server_lifecycle
+
     set +e
-    wait "${SERVER_PID}"
-    exit_code="$?"
+    if [[ -n "${LAUNCHER_PID}" ]]; then
+        wait "${LAUNCHER_PID}" 2>/dev/null
+    fi
     set -e
 
-    if [[ "${exit_code}" -eq 0 ]]; then
+    if [[ "${STOPPING}" == "1" ]]; then
+        exit_code=0
         info "Processo principal do SA-MP foi encerrado normalmente."
     else
+        exit_code=1
         error "Processo principal do SA-MP terminou com codigo ${exit_code}."
     fi
 
